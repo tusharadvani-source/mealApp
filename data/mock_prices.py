@@ -6,6 +6,7 @@ keeping the same (ingredient_name, quantity, unit) -> price interface.
 """
 
 MOCK_PRICES_PER_UNIT = {
+    "bread": 0.20,
     "pizza dough": 2.50,
     "mozzarella cheese": 5.00,
     "tomato": 0.60,

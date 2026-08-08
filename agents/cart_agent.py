@@ -21,9 +21,13 @@ from collections import defaultdict
 
 from data.mock_prices import price_for_ingredient
 
+SERVING_MULTIPLIER = 2  # recipes are shown/shopped for 2 servings; calories stay per-serving
+
 
 def build_cart(recipes, budget):
-    """recipes: list of recipe dicts (with 'ingredients') that David approved for the week.
+    """recipes: list of recipe dicts (with 'ingredients') approved for the week. Each
+    recipe's base ingredient quantities are for ONE serving; the cart shops for
+    SERVING_MULTIPLIER servings of everything, matching what's shown to the user.
 
     Returns a dict: {items: [...], total: float, price_unknown_items: [...], over_budget: bool}
     """
@@ -31,7 +35,7 @@ def build_cart(recipes, budget):
     for recipe in recipes:
         for ing in recipe["ingredients"]:
             key = (ing["name"].lower(), ing["unit"])
-            merged[key]["quantity"] += ing["quantity"]
+            merged[key]["quantity"] += ing["quantity"] * SERVING_MULTIPLIER
             merged[key]["unit"] = ing["unit"]
 
     items = []
