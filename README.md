@@ -9,19 +9,22 @@ user. This is the Develop-phase prototype.
 Any user can sign up (name, username, password) or log back in. Each account triggers its own
 weekly cycle, planned at the **meal level** — breakfast, lunch, and dinner are each their own
 slot with their own recipe, every recipe includes a carb side so it's a complete meal, and
-recipes are shown/shopped for 2 servings with an explicit per-serving calorie label. The app
-shows an estimated maintenance-calorie number (from height/weight) and a capped 400-calorie
-deficit or surplus target based on the user's goal.
+recipes are shown/shopped for a user-chosen number of servings (2-4) with an explicit
+per-serving calorie label. The app shows an estimated maintenance-calorie number (from
+height/weight) and a capped 400-calorie deficit or surplus target based on the user's goal.
 
 **Cooking days and leftovers:** breakfast is always cooked fresh, every day. For lunch and
-dinner, the user picks which days they'll actually cook — the dish is made for 2 servings, one
-eaten fresh and one eaten as a leftover on a paired non-cooking day (`build_leftover_pairing` /
-`synthesize_leftovers` in `app.py`). If there aren't enough cooking days to cover the week, the
-extra days just get their own fresh recipe too, rather than leaving a meal empty. The recipe
-agent never sees or reasons about leftover days — it only ever proposes genuine cook occasions;
-leftovers are synthesized locally and kept in sync across revisions, and the cart only shops for
-real cook occasions (a leftover day's groceries were already covered by its source day's
-2x-serving shop).
+dinner, the user picks which days they'll actually cook and how many servings per dish (2-4,
+highlighted right under the cooking-days picker) — each cook day's dish yields one serving eaten
+fresh, with the rest available as leftovers on paired non-cooking days
+(`build_leftover_pairing` / `synthesize_leftovers` in `app.py`). The app strictly respects the
+chosen cooking days: it never schedules a cook occasion on a day the user didn't pick. If the
+selected cooking days and servings can't cover the whole week, submission is blocked with an
+error listing the uncovered slots, asking the user to add a cooking day, raise servings, or mark
+those meals as eating out. The recipe agent never sees or reasons about leftover days — it only
+ever proposes genuine cook occasions; leftovers are synthesized locally and kept in sync across
+revisions, and the cart only shops for real cook occasions (a leftover day's groceries were
+already covered by its source day's multi-serving shop).
 
 Users also flag per-meal eating-out slots and at most one cheat meal; the recipe agent proposes
 and revises around all of that. Once approved, the cart agent consolidates ingredients across
@@ -45,8 +48,8 @@ the week into a single priced shopping list.
 - `agents/mock_recipe_agent.py` — free, no-API-key fallback with the same interface, for testing
   without spending anything. Auto-selected when `ANTHROPIC_API_KEY` isn't set.
 - `agents/cart_agent.py` — deterministic ingredient consolidation + mock pricing (not an LLM
-  call, by design — see the module docstring for why). Scales quantities by
-  `SERVING_MULTIPLIER` (2) to match what's shown to the user.
+  call, by design — see the module docstring for why). Scales quantities by the user's chosen
+  `servings` (2-4) to match what's shown to the user.
 - `data/mock_recipes.py`, `data/mock_prices.py` — stand-ins for the real Spoonacular API and a
   live web-search pricing lookup (both are the Discovery/Design "synthetic data plan"). 31
   recipes tagged by cuisine and meal type, every one including a carb component.
