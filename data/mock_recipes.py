@@ -1,14 +1,14 @@
-"""Mock recipe catalog standing in for the Spoonacular API (v1 prototype).
+"""Mock recipe catalog -- the fallback used by data/recipe_catalog.py when
+SPOONACULAR_API_KEY isn't set (v1 prototype default; see recipe_catalog.py
+for the real Spoonacular integration).
 
 Each recipe: name, cuisine, meal_type ("breakfast" | "lunch" | "dinner"),
 calories (per serving), ingredients (name, quantity, unit) -- quantities are
-for ONE serving; the app scales them up for display/shopping (see
-SERVING_MULTIPLIER in app.py / cart_agent.py). Every recipe includes a carb
-component (rice, bread, pasta, tortilla, etc.) so it reads as a complete
-meal, not just a protein/veg dish.
-
-Real Spoonacular integration will replace MOCK_RECIPES lookups with live API
-calls, keeping the same shape so recipe_agent.py doesn't change.
+for ONE serving; the app scales them up per-dish based on that cook
+occasion's automatically calculated servings (see compute_meal_coverage in
+app.py / cart_agent.build_cart). Every recipe includes a carb component
+(rice, bread, pasta, tortilla, etc.) so it reads as a complete meal, not
+just a protein/veg dish.
 """
 
 MOCK_RECIPES = [
@@ -430,10 +430,6 @@ MOCK_RECIPES = [
         ],
     },
 ]
-
-
-def all_cuisines():
-    return sorted({r["cuisine"] for r in MOCK_RECIPES})
 
 
 def recipes_for_meal_type(meal_type):

@@ -1,28 +1,21 @@
-"""Free, no-API-key fallback for the recipe agent.
+"""Free, no-Claude-API-key fallback for the recipe agent.
 
 Same propose_week / revise_week contract as agents/recipe_agent.py (same
 inputs, same JSON-shaped output), but picks recipes with plain rule-based
 filtering instead of calling Claude. Lets the app be clicked through end to
-end at zero cost.
+end at zero Claude cost -- it still draws from the real Spoonacular catalog
+via data/recipe_catalog.py if SPOONACULAR_API_KEY is set.
 
 Plans at the meal level -- breakfast, lunch, and dinner are each their own
 slot with their own recipe, not one recipe per day.
 """
 
-from data.mock_recipes import MOCK_RECIPES
+from data import recipe_catalog
 from nutrition import target_for_meal as _target_for_meal
 
 
 def _candidates(cuisines, meal_type, exclude_names):
-    cuisines_lower = {c.lower() for c in cuisines}
-    exclude_lower = {n.lower() for n in exclude_names}
-    return [
-        r
-        for r in MOCK_RECIPES
-        if r["meal_type"] == meal_type
-        and (not cuisines_lower or r["cuisine"].lower() in cuisines_lower)
-        and r["name"].lower() not in exclude_lower
-    ]
+    return recipe_catalog.search_recipes(cuisines, meal_type, exclude_names)
 
 
 def _pick(pool, used_this_week, target_calories, prefer_high_calorie=False):

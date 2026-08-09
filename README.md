@@ -48,16 +48,29 @@ the week into a single priced shopping list.
   (no file I/O — `user_store.py` owns persistence). Profile persists indefinitely, disliked
   meals for a rolling 4 weeks, last week's recipes for a rolling 1 week (repeat-avoidance only).
 - `agents/recipe_agent.py` — calls Claude (via the Tool Runner) to propose/revise the week's
-  meals slot by slot (breakfast/lunch/dinner), using a `search_recipes` tool backed by the mock
-  catalog in `data/mock_recipes.py`.
-- `agents/mock_recipe_agent.py` — free, no-API-key fallback with the same interface, for testing
-  without spending anything. Auto-selected when `ANTHROPIC_API_KEY` isn't set.
+  meals slot by slot (breakfast/lunch/dinner), using a `search_recipes` tool backed by
+  `data/recipe_catalog.py`.
+- `agents/mock_recipe_agent.py` — free, no-Claude-API-key fallback with the same interface, for
+  testing without spending anything on Claude. Auto-selected when `ANTHROPIC_API_KEY` isn't set;
+  still draws from the real Spoonacular catalog if `SPOONACULAR_API_KEY` is set, since the two
+  keys are independent.
 - `agents/cart_agent.py` — deterministic ingredient consolidation + mock pricing (not an LLM
   call, by design — see the module docstring for why). Takes a list of (recipe, servings) pairs
   and scales each cook occasion by its own automatically calculated servings before summing.
-- `data/mock_recipes.py`, `data/mock_prices.py` — stand-ins for the real Spoonacular API and a
-  live web-search pricing lookup (both are the Discovery/Design "synthetic data plan"). 31
-  recipes tagged by cuisine and meal type, every one including a carb component.
+- `data/recipe_catalog.py` — the single place that decides mock vs. real recipes. Calls the live
+  Spoonacular API (`data/spoonacular_api.py`) when `SPOONACULAR_API_KEY` is set, otherwise falls
+  back to the local `data/mock_recipes.py` catalog (31 recipes, 8 cuisines, every one including a
+  carb component). Both recipe agents above go through this module, and it caches every recipe a
+  search returns (by name) so `app.py` can look up full ingredient details later for display and
+  cart-building, since live Spoonacular results aren't a static catalog like the mock one.
+- `data/spoonacular_api.py` — the real Spoonacular `complexSearch` call (cuisine + dish-type
+  filters, nutrition and ingredients pulled in the same request). Raises `SpoonacularError` on
+  any network/API failure rather than silently falling back — `app.py` catches that around both
+  the propose and revise steps and shows the user an error with an explicit "click again to
+  retry" message, per the Design failure-handling plan, instead of crashing or auto-retrying.
+- `data/mock_prices.py` — stand-in for a live web-search pricing lookup (the Discovery/Design
+  "synthetic data plan" for pricing; a separate swap point from the recipe catalog above — see
+  the module docstring for where the swap goes).
 
 ## Running it
 
@@ -66,21 +79,31 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# Optional — omit this to run in free mock mode (no Claude calls):
-export ANTHROPIC_API_KEY=sk-ant-...
+# Optional — omit either or both to run in free/mock mode:
+export ANTHROPIC_API_KEY=sk-ant-...       # omit -> free rule-based recipe picking, no Claude calls
+export SPOONACULAR_API_KEY=...            # omit -> small local mock recipe catalog
 
 streamlit run app.py
 ```
 
+The two keys are independent: you can run with real recipes but a mock (free) planner, a real
+Claude planner over the mock catalog, both real, or both mock. The app shows a warning banner for
+whichever piece is running in mock mode.
+
 ## Known limitations (v1 prototype)
 
-- Recipe catalog and grocery prices are mock data, not the real Spoonacular API or a live
-  web-search pricing lookup yet.
+- Grocery prices are still mock data, not a live web-search pricing lookup (a separate,
+  not-yet-built swap point from the Spoonacular recipe integration above).
 - The calorie estimate is height/weight only (no age, sex, or activity level collected) — the
   UI says so explicitly; treat it as a rough starting point, not a clinical number.
-- With a small cuisine selection and a full 7-day week (21 meal slots), the mock catalog can run
+- In mock-catalog mode, a small cuisine selection with a full 7-day week (21 meal slots) can run
   out of unique recipes per meal type before the week is full — the no-repeat rule then falls
-  back to allowing a repeat rather than leaving a slot empty. Picking more cuisines avoids this.
+  back to allowing a repeat rather than leaving a slot empty. Picking more cuisines avoids this;
+  the real Spoonacular catalog has enough variety that this shouldn't come up.
+- Spoonacular's free tier is rate-limited (150 points/day); a single week proposal can use a
+  meaningful chunk of that (each `search_recipes` call costs ~1-1.5 points, and the agent calls
+  it once per slot needing a recipe). A `SpoonacularError` (including a quota error) is surfaced
+  as a UI message asking the user to retry, not retried automatically.
 - Accounts live in a single local JSON file (`users_data.json`, gitignored) — fine for a local
   demo, not a real production auth store (no rate limiting, no password reset, no sessions
   beyond Streamlit's in-memory session state).

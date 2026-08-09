@@ -11,9 +11,10 @@ Design #3 (Agent loop) for this role:
               each meal roughly fits its share of the calorie target, at most one
               cheat meal and only in the slot the user asked for.
 
-v1 uses MOCK_RECIPES via a search_recipes tool in place of the Spoonacular API
-(Discovery: "Synthetic data plan"). Swapping in the real API later means replacing
-only the search_recipes tool body -- this function's contract stays the same.
+The search_recipes tool below delegates to data/recipe_catalog.py, which calls the
+real Spoonacular API when SPOONACULAR_API_KEY is set, or the local mock catalog
+otherwise (Discovery: "Synthetic data plan") -- this function's contract stays the
+same either way.
 """
 
 import json
@@ -22,7 +23,7 @@ import os
 import anthropic
 from anthropic import beta_tool
 
-from data.mock_recipes import MOCK_RECIPES, all_cuisines
+from data import recipe_catalog
 from nutrition import MEAL_CALORIE_SPLIT
 
 MODEL = "claude-opus-4-8"
@@ -79,15 +80,7 @@ def search_recipes(cuisines: list, meal_type: str, exclude_names: list) -> str:
         meal_type: "breakfast", "lunch", or "dinner" -- must match the slot being filled.
         exclude_names: recipe names that must NOT be returned (disliked or used last week).
     """
-    cuisines_lower = {c.lower() for c in cuisines}
-    exclude_lower = {n.lower() for n in exclude_names}
-    results = [
-        r
-        for r in MOCK_RECIPES
-        if r["meal_type"] == meal_type
-        and (not cuisines_lower or r["cuisine"].lower() in cuisines_lower)
-        and r["name"].lower() not in exclude_lower
-    ]
+    results = recipe_catalog.search_recipes(cuisines, meal_type, exclude_names)
     return json.dumps(results)
 
 
@@ -155,7 +148,7 @@ Daily calorie target: {daily_calorie_target} (split roughly {MEAL_CALORIE_SPLIT}
 Cheat meal slot (at most one, mark ONLY this slot is_cheat_meal=true; if None, no cheat meal this week): {cheat_meal_slot}
 Recipes to avoid (disliked in last 4 weeks or used last week): {exclude}
 
-All available cuisines in the catalog, for reference: {all_cuisines()}
+All available cuisines in the catalog, for reference: {recipe_catalog.all_cuisines()}
 
 For each slot in meal_slots, call search_recipes with cuisines={cuisines}, the slot's
 meal_type, and exclude_names={exclude} to find candidates, then build the week's plan.

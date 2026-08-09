@@ -46,7 +46,8 @@ import streamlit as st
 from agents import cart_agent
 from agents import mock_recipe_agent
 from agents import recipe_agent as real_recipe_agent
-from data.mock_recipes import MOCK_RECIPES, all_cuisines
+from data import recipe_catalog
+from data.spoonacular_api import SpoonacularError
 from nutrition import estimate_maintenance_calories, target_calories, MAX_ADJUSTMENT
 from storage import profile_store, user_store
 
@@ -58,6 +59,7 @@ st.set_page_config(page_title="Weekly Meal Planner", page_icon="🍽️")
 
 USING_MOCK_AGENT = not bool(os.environ.get("ANTHROPIC_API_KEY"))
 recipe_agent = mock_recipe_agent if USING_MOCK_AGENT else real_recipe_agent
+all_cuisines = recipe_catalog.all_cuisines
 
 st.title("🍽️ Weekly Meal Planner")
 st.caption(
@@ -67,17 +69,20 @@ st.caption(
 
 if USING_MOCK_AGENT:
     st.warning(
-        "🧪 **Mock mode** — no ANTHROPIC_API_KEY set, so recipes are picked by simple "
-        "cuisine/calorie filtering, not Claude. Export ANTHROPIC_API_KEY and restart "
-        "to use the real recipe agent."
+        "🧪 **Mock recipe planner** — no ANTHROPIC_API_KEY set, so recipes are picked "
+        "by simple cuisine/calorie filtering, not Claude. Export ANTHROPIC_API_KEY and "
+        "restart to use the real recipe agent."
+    )
+if not recipe_catalog.USE_REAL_RECIPES:
+    st.warning(
+        "🧪 **Mock recipe catalog** — no SPOONACULAR_API_KEY set, so recipes come from "
+        "a small local sample, not live Spoonacular data. Export SPOONACULAR_API_KEY "
+        "and restart to use the real catalog."
     )
 
 
 def recipe_by_name(name):
-    for r in MOCK_RECIPES:
-        if r["name"] == name:
-            return r
-    return None
+    return recipe_catalog.recipe_by_name(name)
 
 
 def slot_label(day, meal_type):
@@ -407,33 +412,51 @@ elif st.session_state.stage == "weekly_inputs":
                         if candidate in meal_slots:
                             cheat_meal_slot = candidate
 
-                    week = profile_store.start_new_week(store)
-                    profile_store.record_weight(store, week, current_weight)
-                    save()
+                    # Compute what the week number WOULD be without committing it yet --
+                    # if the recipe agent fails below, nothing here should be persisted,
+                    # so a manual retry (re-clicking the button) doesn't skip a week
+                    # number or double-record this week's weight.
+                    tentative_week = store["current_week"] + 1
                     daily_calories = custom_calories or computed_target
-                    disliked = profile_store.active_disliked_meals(store, week)
-                    last_week = profile_store.last_week_recipes(store, week)
+                    disliked = profile_store.active_disliked_meals(store, tentative_week)
+                    last_week = profile_store.last_week_recipes(store, tentative_week)
 
-                    with st.spinner("Recipe agent is proposing your week..."):
-                        plan = recipe_agent.propose_week(
-                            cuisines=cuisines,
-                            meal_slots=meal_slots,
-                            eating_out_slots=eating_out_slots,
-                            daily_calorie_target=daily_calories,
-                            cheat_meal_slot=cheat_meal_slot,
-                            disliked_meals=disliked,
-                            last_week_recipes=last_week,
+                    try:
+                        with st.spinner("Recipe agent is proposing your week..."):
+                            plan = recipe_agent.propose_week(
+                                cuisines=cuisines,
+                                meal_slots=meal_slots,
+                                eating_out_slots=eating_out_slots,
+                                daily_calorie_target=daily_calories,
+                                cheat_meal_slot=cheat_meal_slot,
+                                disliked_meals=disliked,
+                                last_week_recipes=last_week,
+                            )
+                    except SpoonacularError as e:
+                        st.error(
+                            f"Spoonacular couldn't return recipes right now ({e}). "
+                            "Click \"Propose my week\" again to retry."
                         )
-                    plan = synthesize_leftovers(plan, leftover_rows_to_add)
+                    except Exception as e:
+                        st.error(
+                            f"The recipe agent hit an unexpected error ({e}). "
+                            "Click \"Propose my week\" again to retry."
+                        )
+                    else:
+                        plan = synthesize_leftovers(plan, leftover_rows_to_add)
 
-                    st.session_state.week = week
-                    st.session_state.cuisines = cuisines
-                    st.session_state.servings_by_slot = servings_by_slot
-                    st.session_state.leftover_rows_to_add = leftover_rows_to_add
-                    st.session_state.plan = plan
-                    st.session_state.disliked_this_session = []
-                    st.session_state.stage = "review_plan"
-                    st.rerun()
+                        week = profile_store.start_new_week(store)
+                        profile_store.record_weight(store, week, current_weight)
+                        save()
+
+                        st.session_state.week = week
+                        st.session_state.cuisines = cuisines
+                        st.session_state.servings_by_slot = servings_by_slot
+                        st.session_state.leftover_rows_to_add = leftover_rows_to_add
+                        st.session_state.plan = plan
+                        st.session_state.disliked_this_session = []
+                        st.session_state.stage = "review_plan"
+                        st.rerun()
 
 # ---------------------------------------------------------------------------
 # Stage 5-6: review plan, revise on feedback
@@ -531,18 +554,30 @@ elif st.session_state.stage == "review_plan":
                 save()
 
                 fresh_only_plan = {"meals": fresh_rows}
-                with st.spinner("Recipe agent is revising your week..."):
-                    revised_fresh = recipe_agent.revise_week(
-                        current_plan=fresh_only_plan,
-                        disliked_meal_names=disliked_now,
-                        new_eating_out_slots=new_eating_out_for_agent,
-                        cuisines=st.session_state.cuisines,
-                        disliked_meals=profile_store.active_disliked_meals(store, week),
-                        last_week_recipes=last_week,
+                try:
+                    with st.spinner("Recipe agent is revising your week..."):
+                        revised_fresh = recipe_agent.revise_week(
+                            current_plan=fresh_only_plan,
+                            disliked_meal_names=disliked_now,
+                            new_eating_out_slots=new_eating_out_for_agent,
+                            cuisines=st.session_state.cuisines,
+                            disliked_meals=profile_store.active_disliked_meals(store, week),
+                            last_week_recipes=last_week,
+                        )
+                except SpoonacularError as e:
+                    st.error(
+                        f"Spoonacular couldn't return recipes right now ({e}). "
+                        "Click \"Revise plan\" again to retry."
                     )
-                revised = synthesize_leftovers(revised_fresh, st.session_state.leftover_rows_to_add)
-                st.session_state.plan = revised
-                st.rerun()
+                except Exception as e:
+                    st.error(
+                        f"The recipe agent hit an unexpected error ({e}). "
+                        "Click \"Revise plan\" again to retry."
+                    )
+                else:
+                    revised = synthesize_leftovers(revised_fresh, st.session_state.leftover_rows_to_add)
+                    st.session_state.plan = revised
+                    st.rerun()
 
         if approve:
             # Only genuine cook occasions need groceries -- a leftover day's meal was
