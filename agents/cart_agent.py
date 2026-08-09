@@ -21,18 +21,18 @@ from collections import defaultdict
 
 from data.mock_prices import price_for_ingredient
 
-DEFAULT_SERVINGS = 2  # recipes are shown/shopped for this many servings by default; calories stay per-serving
 
-
-def build_cart(recipes, budget, servings=DEFAULT_SERVINGS):
-    """recipes: list of recipe dicts (with 'ingredients') approved for the week. Each
-    recipe's base ingredient quantities are for ONE serving; the cart shops for
-    `servings` servings of everything, matching what's shown to the user.
+def build_cart(recipe_servings_pairs, budget):
+    """recipe_servings_pairs: list of (recipe, servings) for every genuine cook occasion
+    approved for the week. Each recipe's base ingredient quantities are for ONE serving;
+    each occasion is scaled to the servings that specific dish needs (sized upstream to
+    cover exactly its cook day plus the leftover days assigned to it), matching what's
+    shown to the user, then summed across occasions.
 
     Returns a dict: {items: [...], total: float, price_unknown_items: [...], over_budget: bool}
     """
     merged = defaultdict(lambda: {"quantity": 0.0, "unit": None})
-    for recipe in recipes:
+    for recipe, servings in recipe_servings_pairs:
         for ing in recipe["ingredients"]:
             key = (ing["name"].lower(), ing["unit"])
             merged[key]["quantity"] += ing["quantity"] * servings
