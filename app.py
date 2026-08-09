@@ -73,12 +73,6 @@ if USING_MOCK_AGENT:
         "by simple cuisine/calorie filtering, not Claude. Export ANTHROPIC_API_KEY and "
         "restart to use the real recipe agent."
     )
-if not recipe_catalog.USE_REAL_RECIPES:
-    st.warning(
-        "🧪 **Mock recipe catalog** — no SPOONACULAR_API_KEY set, so recipes come from "
-        "a small local sample, not live Spoonacular data. Export SPOONACULAR_API_KEY "
-        "and restart to use the real catalog."
-    )
 
 
 def recipe_by_name(name):
