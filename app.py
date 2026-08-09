@@ -7,13 +7,23 @@ at the MEAL level (breakfast, lunch, dinner are each their own slot):
   2. Weekly trigger + current-weight confirmation, with a live maintenance/target
      calorie estimate shown (capped 400-cal deficit for weight loss, 400-cal surplus
      for bulking).
-  3. Cuisines, per-day-per-meal eating-out flags, an optional single cheat-meal slot,
-     optional calorie target override.
-  4. Orchestrator -> recipe agent proposes every non-eating-out meal slot for the week.
-  5. User reviews (each meal expandable to its full recipe, scaled to 2 servings, with
-     an explicit "per serving" calorie label), flags dislikes / additional eating-out slots.
-  6. Recipe agent revises; loop until approved.
-  7. Orchestrator -> cart agent consolidates + prices the shopping list (2 servings/meal).
+  3. Cuisines, which days to actually cook lunch/dinner, per-day-per-meal eating-out
+     flags, an optional single cheat-meal slot, optional calorie target override.
+  4. Orchestrator -> recipe agent proposes every genuine cook occasion for the week
+     (breakfast is cooked fresh daily; lunch/dinner only on the user's chosen cooking
+     days). Non-cooking-day lunches/dinners are filled locally as leftovers from a
+     paired cooking day, since each dish is cooked for 2 servings (see
+     _build_leftover_pairing / _synthesize_leftovers below) -- the recipe agent never
+     sees or reasons about leftover rows, it only ever proposes genuine cook occasions.
+  5. User reviews (each cooked meal expandable to its full recipe, scaled to 2 servings,
+     with an explicit "per serving" calorie label; leftover meals shown as a simple
+     reference to their source day), flags dislikes / additional eating-out slots.
+  6. Recipe agent revises the genuine cook occasions; leftovers are resynthesized from
+     the revised plan so a disliked dish disappears from both its cook day and any day
+     eating its leftovers.
+  7. Orchestrator -> cart agent consolidates + prices the shopping list. Only genuine
+     cook occasions are priced -- a leftover day doesn't need its own groceries, since
+     the 2x-serving shop for its source day already covers it (see the approve handler).
   8. Shopping list handed back to the user; nothing is ever purchased automatically.
 
 This file is the orchestrator: it holds no meal-selection or pricing logic itself --
@@ -72,6 +82,91 @@ def save():
     user_store.save_state(st.session_state.username, st.session_state.store)
 
 
+def evenly_spaced_days(n):
+    """n days spread across the week, for a sensible default cooking-day selection."""
+    if n <= 0:
+        return []
+    if n >= 7:
+        return list(DAYS_OF_WEEK)
+    step = 7 / n
+    indices = []
+    for i in range(n):
+        idx = round(i * step) % 7
+        if idx not in indices:
+            indices.append(idx)
+    i = 0
+    while len(indices) < n and i < 7:
+        if i not in indices:
+            indices.append(i)
+        i += 1
+    return [DAYS_OF_WEEK[i] for i in sorted(indices)]
+
+
+def build_leftover_pairing(cooking_days, eating_out_by_day):
+    """For lunch/dinner: pair each non-cooking day with a cooking day whose second
+    serving it eats as a leftover. Each cooking day's dish is made for
+    SERVING_MULTIPLIER (2) servings -- one eaten fresh, one eaten as a leftover on
+    exactly one other day -- so a cooking day can cover at most one leftover day.
+
+    Returns (fresh_days, leftover_pairs): fresh_days is every day that needs its own
+    freshly cooked lunch/dinner (the chosen cooking days, plus any non-cooking days
+    left over once leftover supply runs out); leftover_pairs maps day -> source day.
+    """
+    non_cooking_days = [d for d in DAYS_OF_WEEK if d not in cooking_days]
+    fresh_days = list(cooking_days)
+    leftover_pairs = {}
+    for i, day in enumerate(non_cooking_days):
+        if i < len(cooking_days):
+            leftover_pairs[day] = cooking_days[i]
+        else:
+            fresh_days.append(day)  # no leftover supply left -- cook fresh here too
+    return fresh_days, leftover_pairs
+
+
+def synthesize_leftovers(plan, leftover_rows_to_add):
+    """Copy each genuine cook occasion's result onto the day(s) that eat its leftovers.
+    The recipe agent never sees these rows -- they're a local, deterministic echo of
+    an existing row, so there's nothing for the agent to get wrong here."""
+    meals_by_key = {(m["day"], m["meal_type"]): m for m in plan["meals"]}
+    full_meals = list(plan["meals"])
+    for lo in leftover_rows_to_add:
+        source_row = meals_by_key.get((lo["source_day"], lo["meal_type"]))
+        if source_row and source_row.get("recipe_name"):
+            full_meals.append(
+                {
+                    "day": lo["day"], "meal_type": lo["meal_type"],
+                    "recipe_name": source_row["recipe_name"], "cuisine": source_row["cuisine"],
+                    "calories": source_row["calories"], "is_cheat_meal": False,
+                    "is_eating_out": False, "is_leftover": True,
+                    "leftover_source_day": lo["source_day"],
+                }
+            )
+        else:
+            # Source day ended up with no recipe (e.g. it was flagged eating out) --
+            # there's no leftover to eat, so this day has no meal here either.
+            full_meals.append(
+                {
+                    "day": lo["day"], "meal_type": lo["meal_type"], "recipe_name": None,
+                    "cuisine": None, "calories": 0, "is_cheat_meal": False,
+                    "is_eating_out": True, "is_leftover": False, "leftover_source_day": None,
+                }
+            )
+    return {
+        "meals": full_meals,
+        "week_avg_daily_calories": recompute_week_avg(full_meals),
+        "notes": plan.get("notes", ""),
+    }
+
+
+def recompute_week_avg(meals):
+    day_totals = {}
+    for m in meals:
+        if not m.get("is_eating_out") and m.get("recipe_name"):
+            day_totals.setdefault(m["day"], []).append(m["calories"])
+    day_sums = [sum(cals) for cals in day_totals.values()]
+    return round(sum(day_sums) / len(day_sums)) if day_sums else 0
+
+
 # ---------------------------------------------------------------------------
 # Stage 0: auth gate -- nothing below runs until logged in
 # ---------------------------------------------------------------------------
@@ -121,7 +216,10 @@ store = st.session_state.store
 with st.sidebar:
     st.write(f"👤 Signed in as **{store['profile']['name'] or st.session_state.username}**")
     if st.button("Log out"):
-        for key in ["username", "store", "stage", "week", "cuisines", "plan", "disliked_this_session", "cart"]:
+        for key in [
+            "username", "store", "stage", "week", "cuisines", "plan",
+            "disliked_this_session", "cart", "leftover_rows_to_add",
+        ]:
             st.session_state.pop(key, None)
         st.rerun()
 
@@ -137,9 +235,12 @@ if st.session_state.stage == "profile_setup":
         height_in = st.number_input("Height (inches)", min_value=48, max_value=96, value=70)
         goal = st.selectbox("Goal", ["weight_loss", "bulking"])
         budget = st.number_input("Weekly grocery budget ($)", min_value=10.0, value=100.0, step=5.0)
+        cooking_days_default = st.slider(
+            "Typical days per week you cook lunch/dinner (breakfast is always daily)", 1, 7, 4
+        )
         submitted = st.form_submit_button("Save profile")
         if submitted:
-            profile_store.set_profile(store, height_in, goal, budget, default_cooking_days_per_week=7)
+            profile_store.set_profile(store, height_in, goal, budget, cooking_days_default)
             save()
             st.session_state.stage = "idle"
             st.rerun()
@@ -198,6 +299,17 @@ elif st.session_state.stage == "weekly_inputs":
     with st.form("weekly_form"):
         cuisines = st.multiselect("Cuisines", all_cuisines())
 
+        st.subheader("Cooking days")
+        st.caption(
+            "Lunch and dinner are cooked for 2 servings — on days you don't cook, you'll eat "
+            "the leftover half of a dish from a nearby cooking day instead of a fresh recipe. "
+            "Breakfast is cooked fresh every day regardless."
+        )
+        default_cooking_days = evenly_spaced_days(store["profile"]["default_cooking_days_per_week"])
+        cooking_days = st.multiselect(
+            "Which days will you cook lunch/dinner?", DAYS_OF_WEEK, default=default_cooking_days
+        )
+
         st.subheader("Eating out")
         st.caption("For each day, flag any meals you already know you'll be eating out.")
         eating_out_by_day = {}
@@ -218,16 +330,41 @@ elif st.session_state.stage == "weekly_inputs":
                     for mt in eating_out_by_day[day]
                 ]
                 eating_out_keys = {(s["day"], s["meal_type"]) for s in eating_out_slots}
-                meal_slots = [
-                    {"day": day, "meal_type": mt}
-                    for day in DAYS_OF_WEEK
-                    for mt in MEAL_TYPES
-                    if (day, mt) not in eating_out_keys
+
+                # Breakfast: fresh every day, no leftovers.
+                breakfast_slots = [
+                    {"day": d, "meal_type": "breakfast"}
+                    for d in DAYS_OF_WEEK
+                    if (d, "breakfast") not in eating_out_keys
                 ]
+
+                # Lunch/dinner: only cooking days (plus any overflow days once leftover
+                # supply runs out) get a genuine fresh recipe; the rest eat a leftover.
+                fresh_days, leftover_pairs = build_leftover_pairing(cooking_days, eating_out_by_day)
+                lunch_dinner_slots = []
+                leftover_rows_to_add = []
+                for mt in ["lunch", "dinner"]:
+                    for day in DAYS_OF_WEEK:
+                        if (day, mt) in eating_out_keys:
+                            continue
+                        if day in fresh_days:
+                            lunch_dinner_slots.append({"day": day, "meal_type": mt})
+                        else:
+                            source_day = leftover_pairs[day]
+                            if (source_day, mt) in eating_out_keys:
+                                # Source day's meal is eating out -- no leftover to inherit.
+                                eating_out_slots.append({"day": day, "meal_type": mt})
+                            else:
+                                leftover_rows_to_add.append(
+                                    {"day": day, "meal_type": mt, "source_day": source_day}
+                                )
+
+                meal_slots = breakfast_slots + lunch_dinner_slots
+
                 cheat_meal_slot = None
                 if include_cheat and cheat_day and cheat_meal_type:
                     candidate = {"day": cheat_day, "meal_type": cheat_meal_type.lower()}
-                    if (candidate["day"], candidate["meal_type"]) not in eating_out_keys:
+                    if candidate in meal_slots:
                         cheat_meal_slot = candidate
 
                 week = profile_store.start_new_week(store)
@@ -247,9 +384,11 @@ elif st.session_state.stage == "weekly_inputs":
                         disliked_meals=disliked,
                         last_week_recipes=last_week,
                     )
+                plan = synthesize_leftovers(plan, leftover_rows_to_add)
 
                 st.session_state.week = week
                 st.session_state.cuisines = cuisines
+                st.session_state.leftover_rows_to_add = leftover_rows_to_add
                 st.session_state.plan = plan
                 st.session_state.disliked_this_session = []
                 st.session_state.stage = "review_plan"
@@ -281,6 +420,11 @@ elif st.session_state.stage == "review_plan":
             slot_lookup[slot_label(row["day"], row["meal_type"])] = (row["day"], row["meal_type"])
             if row.get("is_eating_out"):
                 st.write(f"　{row['meal_type'].capitalize()} — eating out")
+            elif row.get("is_leftover"):
+                st.write(
+                    f"　{row['meal_type'].capitalize()} — {row['recipe_name']} "
+                    f"♻️ leftover from {row['leftover_source_day']}"
+                )
             else:
                 tag = " 🎉 cheat meal" if row.get("is_cheat_meal") else ""
                 label = f"{row['meal_type'].capitalize()} — {row['recipe_name']} ({row['cuisine']}, {row['calories']} cal per serving){tag}"
@@ -290,7 +434,10 @@ elif st.session_state.stage == "review_plan":
                         st.write(f"**Ingredients (serves {SERVING_MULTIPLIER}):**")
                         for ing in full_recipe["ingredients"]:
                             st.write(f"- {ing['quantity'] * SERVING_MULTIPLIER} {ing['unit']} {ing['name']}")
-                        st.caption(f"{row['calories']} cal per serving")
+                        st.caption(
+                            f"{row['calories']} cal per serving — the 2nd serving is today's "
+                            f"leftover-covered day, if any."
+                        )
                     else:
                         st.caption("Ingredient details unavailable for this recipe.")
 
@@ -299,11 +446,12 @@ elif st.session_state.stage == "review_plan":
         st.caption(plan["notes"])
 
     cooked_rows = [r for r in meal_rows if not r.get("is_eating_out")]
+    fresh_rows = [r for r in cooked_rows if not r.get("is_leftover")]
     with st.form("feedback_form"):
         st.subheader("Feedback")
         disliked_now = st.multiselect(
             "Any meals you dislike and want swapped?",
-            [r["recipe_name"] for r in cooked_rows],
+            sorted({r["recipe_name"] for r in fresh_rows}),
         )
         new_eating_out_labels = st.multiselect(
             "Any additional meals you're now eating out?",
@@ -317,31 +465,45 @@ elif st.session_state.stage == "review_plan":
             if not disliked_now and not new_eating_out_labels:
                 st.warning("Flag at least one meal before revising.")
             else:
-                new_eating_out_slots = [
-                    {"day": slot_lookup[label][0], "meal_type": slot_lookup[label][1]}
-                    for label in new_eating_out_labels
+                fresh_keys = {(r["day"], r["meal_type"]) for r in fresh_rows}
+                new_eating_out_keys = {slot_lookup[label] for label in new_eating_out_labels}
+                # Slots on a genuine cook occasion go to the agent; slots that are
+                # leftover echoes are handled locally by dropping them from the pairing.
+                new_eating_out_for_agent = [
+                    {"day": d, "meal_type": mt} for (d, mt) in new_eating_out_keys if (d, mt) in fresh_keys
                 ]
+                st.session_state.leftover_rows_to_add = [
+                    lo
+                    for lo in st.session_state.leftover_rows_to_add
+                    if (lo["day"], lo["meal_type"]) not in new_eating_out_keys
+                ]
+
                 st.session_state.disliked_this_session.extend(disliked_now)
                 for name in disliked_now:
                     profile_store.add_disliked_meal(store, name, week)
                 save()
+
+                fresh_only_plan = {"meals": fresh_rows}
                 with st.spinner("Recipe agent is revising your week..."):
-                    revised = recipe_agent.revise_week(
-                        current_plan=plan,
+                    revised_fresh = recipe_agent.revise_week(
+                        current_plan=fresh_only_plan,
                         disliked_meal_names=disliked_now,
-                        new_eating_out_slots=new_eating_out_slots,
+                        new_eating_out_slots=new_eating_out_for_agent,
                         cuisines=st.session_state.cuisines,
                         disliked_meals=profile_store.active_disliked_meals(store, week),
                         last_week_recipes=last_week,
                     )
+                revised = synthesize_leftovers(revised_fresh, st.session_state.leftover_rows_to_add)
                 st.session_state.plan = revised
                 st.rerun()
 
         if approve:
-            recipe_names_used = [r["recipe_name"] for r in cooked_rows if r.get("recipe_name")]
-            profile_store.record_week_recipes(store, week, recipe_names_used)
+            # Only genuine cook occasions need groceries -- a leftover day's meal was
+            # already paid for by its source day's 2x-serving shop (see build_cart).
+            all_dish_names_used = sorted({r["recipe_name"] for r in cooked_rows if r.get("recipe_name")})
+            profile_store.record_week_recipes(store, week, all_dish_names_used)
             save()
-            recipes_full = [recipe_by_name(n) for n in recipe_names_used]
+            recipes_full = [recipe_by_name(r["recipe_name"]) for r in fresh_rows if r.get("recipe_name")]
             recipes_full = [r for r in recipes_full if r is not None]
             with st.spinner("Cart agent is building your shopping list..."):
                 cart = cart_agent.build_cart(recipes_full, store["profile"]["budget"])
@@ -354,7 +516,10 @@ elif st.session_state.stage == "review_plan":
 # ---------------------------------------------------------------------------
 elif st.session_state.stage == "cart":
     st.header("Your shopping list")
-    st.caption(f"Quantities are for {SERVING_MULTIPLIER} servings of each meal.")
+    st.caption(
+        f"Quantities are for {SERVING_MULTIPLIER} servings of each cooked dish — enough for the "
+        "cook day plus its leftover day, where applicable."
+    )
     cart = st.session_state.cart
     for item in cart["items"]:
         if item["price_unknown"]:
